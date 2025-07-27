@@ -1,0 +1,84 @@
+name: 'Terraform CI/CD'
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  plan-backend:
+    name: 'Plan: 00-backend'
+    runs-on: ubuntu-latest
+    # This job only runs if changes were made in the 00-backend directory
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && contains(join(github.event.commits.*.modified, ' '), 'modules/00-backend/'))
+
+    defaults:
+      run:
+        working-directory: ./modules/00-backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan -input=false -no-color
+
+      - name: Upload Plan Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-artifacts
+          path: ./modules/00-backend/tfplan
+
+  apply-backend:
+    name: 'Apply: 00-backend'
+    runs-on: ubuntu-latest
+    needs: plan-backend
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production  # Enable this after creating the environment in GitHub
+
+    defaults:
+      run:
+        working-directory: ./modules/00-backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-artifacts
+          path: ./modules/00-backend/
+      - name: Terraform Init
+        run: terraform init
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
