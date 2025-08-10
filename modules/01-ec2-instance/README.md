@@ -30,14 +30,6 @@ If you prefer to set up manually:
 
 ---
 
-## State Management
-
-This project is configured to use a remote backend in AWS S3 for state management and DynamoDB for state locking. This ensures that the state is stored securely and prevents conflicts during team collaboration.
-
-Before running `terraform init` for this project, you must ensure that the backend infrastructure from the `00-backend` project has been created.
-
----
-
 ## Configuration
 
 The configuration is split into three files for better organization.
@@ -129,6 +121,40 @@ This file declares the values that will be displayed after your infrastructure i
     ```
 
     Replace `/path/to/your/private-key.pem` with the actual path to your private key file and `<INSTANCE_PUBLIC_IP>` with the IP from the Terraform output.
+
+---
+
+## Optional Inputs
+
+This module can be integrated with other services by providing optional variables. The recommended way to do this is by creating a `terraform.tfvars` file in this directory.
+
+### Attaching an IAM Role (Optional)
+
+This module supports attaching an IAM instance profile to the EC2 instance, allowing it to securely interact with other AWS services without hardcoding credentials.
+
+To attach a role, you can provide its instance profile name using the optional `iam_instance_profile_name` variable. You can create the necessary IAM resources using the `07-iam-role` module.
+
+1.  **Get the Profile Name**: Run `terraform output` in the `07-iam-role` directory and copy the `iam_instance_profile_name`.
+2.  **Create `terraform.tfvars`**: In this EC2 module directory, create a `terraform.tfvars` file with the following content:
+    ```hcl
+    # terraform.tfvars
+    iam_instance_profile_name = "your-profile-name-here" # <-- Paste the name here
+    ```
+3.  **Apply**: Run `terraform apply`. The EC2 instance will be created or updated with the specified role attached.
+
+### Allowing Traffic from a Load Balancer (Optional)
+
+This module supports attaching an Application Load Balancer to the EC2 instance, allowing it to securely send traffic to this instance.
+
+To enable this:
+
+1.  **Uncomment the Ingress Rule**: In this module's `main.tf` file, find the `aws_security_group` resource and uncomment the second `ingress` block (the one for port 80).
+2.  **Provide the ALB Security Group ID**: In this EC2 module directory, create a `terraform.tfvars` file and provide the security group ID from your `08-alb` module.
+    ```hcl
+    # terraform.tfvars
+    alb_security_group_id = "sg-xxxxxxxxxxxxxxxxx"
+    ```
+3.  **Apply**: Run `terraform apply`. The security group will be updated to allow traffic from the ALB.
 
 ## Cleaning Up
 
