@@ -1,6 +1,6 @@
 # Terraform AWS VPC and Public Subnet
 
-This Terraform project creates a foundational network infrastructure in AWS. It provisions a new Virtual Private Cloud (VPC) along with all the necessary components to support a public-facing subnet.
+This Terraform project creates a foundational, production-ready network infrastructure in AWS. It provisions a new Virtual Private Cloud (VPC) with both public and private subnets across multiple Availability Zones, making it secure and highly available.
 
 This setup is the first step for building isolated and secure cloud environments.
 
@@ -9,10 +9,13 @@ This setup is the first step for building isolated and secure cloud environments
 This configuration will create the following resources:
 
 1.  **VPC (`aws_vpc`)**: A logically isolated virtual network in the AWS cloud.
-2.  **Public Subnet (`aws_subnet`)**: A subnet within the VPC where resources like EC2 instances can be launched with direct access to the internet.
-3.  **Internet Gateway (`aws_internet_gateway`)**: Allows communication between the VPC and the internet.
-4.  **Route Table (`aws_route_table`)**: Defines rules to direct network traffic. A route is created to send all outbound traffic (`0.0.0.0/0`) to the Internet Gateway.
-5.  **Route Table Association**: Links the public subnet to the route table, enabling the routing rules for any resources within that subnet.
+2.  **Public Subnets**: For resources that need direct internet access, like our Application Load Balancer. These subnets have a route to an **Internet Gateway**.
+3.  **Private Subnets**: For secure backend resources like our EC2 instances and databases. These subnets **cannot** be reached from the internet directly.
+4.  **NAT Gateway**: Placed in a public subnet, this allows instances in the private subnets to initiate outbound connections to the internet (e.g., to download software updates) without being exposed to inbound traffic.
+5.  **Elastic IP**: A static IP address for the NAT Gateway.
+6.  **Internet Gateway (`aws_internet_gateway`)**: Allows communication between the VPC and the internet.
+7.  **Route Table (`aws_route_table`)**: Defines rules to direct network traffic. A route is created to send all outbound traffic (`0.0.0.0/0`) to the Internet Gateway.
+8.  **Route Table Association**: Links the public subnet to the route table, enabling the routing rules for any resources within that subnet.
 
 ## File Structure
 
@@ -40,47 +43,11 @@ If you prefer to set up manually:
 
 ---
 
-## State Management
-
-This project is configured to use a remote backend in AWS S3 for state management and DynamoDB for state locking. This ensures that the state is stored securely and prevents conflicts during team collaboration.
-
-Before running `terraform init` for this project, you must ensure that the backend infrastructure from the `00-backend` project has been created.
-
----
-
 ## Configuration
 
 ### `variables.tf`
 
 This file allows you to customize the deployment without changing the main resource code. You can change the default values here or provide your own when running Terraform.
-
-- **`aws_region`**: The AWS region where your VPC will be created.
-- **`vpc_cidr_block`**: The overall IP address range for the VPC.
-- **`public_subnet_cidr_block`**: The IP address range for the public subnet. This must be a sub-range of the VPC's CIDR block.
-
-<!-- end list -->
-
-```terraform
-# variables.tf
-
-variable "aws_region" {
-  description = "The AWS region to deploy resources in."
-  type        = string
-  default     = "ap-south-1"
-}
-
-variable "vpc_cidr_block" {
-  description = "The CIDR block for the VPC."
-  type        = string
-  default     = "10.0.0.0/16"
-}
-
-variable "public_subnet_cidr_block" {
-  description = "The CIDR block for the public subnet."
-  type        = string
-  default     = "10.0.1.0/24"
-}
-```
 
 ### `main.tf`
 
