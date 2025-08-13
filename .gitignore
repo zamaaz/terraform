@@ -1,17 +1,35 @@
+# .gitignore
+
+# Terraform Core Files
 .terraform/
-terraform.tfstate
-terraform.tfstate.backup
-*.tfplan
-*.tfvars
-*.tfvars.json
+*.tfstate
+*.tfstate.*
 crash.log
-*.log
+*.tflog
 override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-.terraformrc
-terraform.rc
-.vscode/
-.idea/
+
+# Sensitive Variable Files
+*.tfvars
+*.tfvars.json
+
+# Terraform Provider Lock File
+# .terraform.lock.hcl
+
+# Kubernetes Secret Manifests
+# Ignore any YAML file that ends with -secret.yaml or secret.yaml.
+# This allows you to commit other manifests while keeping passwords secure.
+**/*-secret.yaml
+**/secret.yaml
+
+# Helm Chart Dependencies
+**/charts/*.tgz
+
+# Go Test Files (from Terratest)
+/test/test.test
+
+# General OS Files
+.DS_Store
 *.swp
