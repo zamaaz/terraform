@@ -1,0 +1,317 @@
+name: "Terraform and Application CI/CD"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # =================================================================
+  # ==           APPLICATION BUILD & PUSH WORKFLOW                 ==
+  # =================================================================
+  build-and-push-app:
+    name: "Build & Push App to ECR (only if app/ changed)"
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed files
+        id: changes
+        uses: tj-actions/changed-files@v45
+
+      - name: Configure AWS Credentials
+        if: contains(steps.changes.outputs.all_changed_files, 'app/')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Login to Amazon ECR
+        if: contains(steps.changes.outputs.all_changed_files, 'app/')
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        if: contains(steps.changes.outputs.all_changed_files, 'app/')
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: my-app-ecr-repo # Must match the name from your ECS module
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" ./app
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+  # =================================================================
+  # ==                  TERRAFORM PLAN (ALL MODULES)               ==
+  # =================================================================
+  plan-module:
+    name: "Plan: ${{ matrix.module-name }}"
+    runs-on: ubuntu-latest
+    needs: build-and-push-app
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module-name: 00-backend
+            module-path: 00-backend
+          - module-name: 01-vpc
+            module-path: 01-vpc
+          - module-name: 02-ec2-instance
+            module-path: 02-ec2-instance
+          - module-name: 03-s3-bucket
+            module-path: 03-s3-bucket
+          - module-name: 04-dynamodb-table
+            module-path: 04-dynamodb-table
+          - module-name: 05-documentdb
+            module-path: 05-documentdb
+          - module-name: 06-rds
+            module-path: 06-rds
+          - module-name: 07-iam-role
+            module-path: 07-iam-role
+          - module-name: 08-alb
+            module-path: 08-alb
+          - module-name: 09-auto-scaling-group
+            module-path: 09-auto-scaling-group
+          - module-name: 10-lambda-api
+            module-path: 10-lambda-api
+          - module-name: 11-ecs
+            module-path: 11-ecs
+
+    defaults:
+      run:
+        working-directory: ./modules/${{ matrix.module-path }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Terraform Format Check (repo root)
+        run: terraform fmt -check -recursive
+        working-directory: ./
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      # Non-ECS plan
+      - name: Terraform Plan
+        if: matrix.module-name != '11-ecs'
+        run: terraform plan -out=tfplan
+
+      # ECS plan needs the image; fall back if app image wasn’t built this run
+      - name: Terraform Plan (ECS with container_image)
+        if: matrix.module-name == '11-ecs'
+        env:
+          CONTAINER_IMAGE: ${{ needs.build-and-push-app.outputs.image != '' && needs.build-and-push-app.outputs.image || 'public.ecr.aws/nginx/nginx:latest' }}
+        run: terraform plan -out=tfplan -var="container_image=${CONTAINER_IMAGE}"
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.module-name }}-plan
+          path: ./modules/${{ matrix.module-path }}/tfplan
+          retention-days: 1
+
+      - name: Upload Backend State (only for 00-backend)
+        if: matrix.module-name == '00-backend'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-state
+          path: ./modules/00-backend/terraform.tfstate
+          retention-days: 1
+
+  # =================================================================
+  # ==                       ORDERED APPLIES                       ==
+  # =================================================================
+
+  # Core foundation first (backend, vpc, iam)
+  apply-core:
+    name: "Apply (Core): ${{ matrix.module-name }}"
+    runs-on: ubuntu-latest
+    needs: plan-module
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.plan-module.result == 'success'
+    environment: production
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - module-name: 00-backend
+            module-path: 00-backend
+          - module-name: 01-vpc
+            module-path: 01-vpc
+          - module-name: 07-iam-role
+            module-path: 07-iam-role
+    defaults:
+      run:
+        working-directory: ./modules/${{ matrix.module-path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.module-name }}-plan
+          path: ./modules/${{ matrix.module-path }}
+      - name: Download Backend State
+        if: matrix.module-name == '00-backend'
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-state
+          path: ./modules/00-backend
+      - name: Terraform Init
+        run: terraform init
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+  # Networking & shared services (alb, s3, dynamodb)
+  apply-network:
+    name: "Apply (Network & Shared): ${{ matrix.module-name }}"
+    runs-on: ubuntu-latest
+    needs: apply-core
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - module-name: 08-alb
+            module-path: 08-alb
+          - module-name: 03-s3-bucket
+            module-path: 03-s3-bucket
+          - module-name: 04-dynamodb-table
+            module-path: 04-dynamodb-table
+    defaults:
+      run:
+        working-directory: ./modules/${{ matrix.module-path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.module-name }}-plan
+          path: ./modules/${{ matrix.module-path }}
+      - name: Terraform Init
+        run: terraform init
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+  # Data stores (documentdb, rds)
+  apply-data:
+    name: "Apply (Data): ${{ matrix.module-name }}"
+    runs-on: ubuntu-latest
+    needs: apply-network
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - module-name: 05-documentdb
+            module-path: 05-documentdb
+          - module-name: 06-rds
+            module-path: 06-rds
+    defaults:
+      run:
+        working-directory: ./modules/${{ matrix.module-path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.module-name }}-plan
+          path: ./modules/${{ matrix.module-path }}
+      - name: Terraform Init
+        run: terraform init
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+  # Compute layer last (ec2/asg/lambda/ecs)
+  apply-compute:
+    name: "Apply (Compute): ${{ matrix.module-name }}"
+    runs-on: ubuntu-latest
+    needs: apply-data
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - module-name: 02-ec2-instance
+            module-path: 02-ec2-instance
+          - module-name: 09-auto-scaling-group
+            module-path: 09-auto-scaling-group
+          - module-name: 10-lambda-api
+            module-path: 10-lambda-api
+          - module-name: 11-ecs
+            module-path: 11-ecs
+    defaults:
+      run:
+        working-directory: ./modules/${{ matrix.module-path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.module-name }}-plan
+          path: ./modules/${{ matrix.module-path }}
+      - name: Terraform Init
+        run: terraform init
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
